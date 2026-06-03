@@ -184,8 +184,9 @@ def test_merge_remapping(tmp_path):
     ), patch("solar_consumer.data.fetch_gb_data.PVLive", return_value=mock_pvl):
         if "UK_PVLIVE_N_GSPS" in os.environ:
             del os.environ["UK_PVLIVE_N_GSPS"]
-        if "UK_PVLIVE_MAX_GSP_ID" in os.environ:
-            del os.environ["UK_PVLIVE_MAX_GSP_ID"]
+        # Set a high cap so fictional GSP ID 999 is not filtered out.
+        # Deleting the env var falls back to the default 342, which excludes 999 (999 > 342).
+        os.environ["UK_PVLIVE_MAX_GSP_ID"] = "9999"
         from solar_consumer.data.fetch_gb_data import fetch_gb_data_historic
         df = fetch_gb_data_historic(regime="in-day")
     gsp999 = df[df["gsp_id"] == 999]
