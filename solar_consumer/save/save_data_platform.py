@@ -77,7 +77,19 @@ async def _execute_async_tasks(
         if not ignore_exceptions:
             raise exc
         else:
-            logger.warning(f"Task failed: {exc}")
+            # Surface INVALID_ARGUMENT separately — this usually means generation
+            # exceeded 110% of the DP's stored capacity (stale capacity on first run).
+            try:
+                from grpclib.exceptions import GRPCError
+                from grpclib.const import Status
+                if isinstance(exc, GRPCError) and exc.status == Status.INVALID_ARGUMENT:
+                    logger.warning(
+                        f"INVALID_ARGUMENT from Data Platform (generation > 110% of stored capacity): {exc.message}"
+                    )
+                else:
+                    logger.warning(f"Task failed: {exc}")
+            except ImportError:
+                logger.warning(f"Task failed: {exc}")
     return results
 
 
@@ -442,7 +454,16 @@ async def save_generation_to_data_platform(
         old_cap = row.effective_capacity_watts
         metadata = row.metadata
 
-        logger.info(f"Updating {lid} from {old_cap} to {new_cap} at {t}")
+        gsp_id_val = (
+            _extract_metadata_value(row.metadata, "gsp_id", "number")
+            if isinstance(row.metadata, dict) else "?"
+        )
+        old_cap_kw = round(old_cap / 1000, 1) if old_cap else 0
+        new_cap_kw = round(new_cap / 1000, 1) if new_cap else 0
+        logger.info(
+            f"UpdateLocation | loc={lid} gsp_id={gsp_id_val} | "
+            f"capacity: {old_cap_kw} kW → {new_cap_kw} kW (at {t})"
+        )
 
         # this is specific to GB consumer at the moment
         if "capacity_no_degradation_kw" in updates_df.columns:
