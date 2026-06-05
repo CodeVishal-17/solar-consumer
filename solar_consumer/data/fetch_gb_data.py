@@ -79,7 +79,7 @@ class GSPMergeSource(BaseModel):
     """A single source GSP contributing to a merged/reconstructed target GSP."""
 
     gsp_id: int
-    weight: float = Field(default=1.0, description="Multiplier applied to this source's generation")
+    weight: float = Field(default=1.0, ge=0, description="Multiplier applied to this source's generation")
 
 
 class GSPMergeConfig(BaseModel):
@@ -202,11 +202,11 @@ def reconstruct_gsp_from_weights(
     updated_gmt = source_dfs[0]["updated_gmt"].values
 
     # Concatenate all weighted sources and sum every numeric column in one pass.
-    # generation_mw reflects the applied weights; capacity columns are summed so that
-    # the total capacity matches the total generation (avoids exceeding the 110% DP limit).
-    numeric_cols = ["datetime_gmt", "generation_mw", "installedcapacity_mwp", "capacity_mwp"]
+    # generation_mw reflects the applied weights; capacity columns are summed across sources.
+    # datetime_gmt is the groupby key (not summed); the rest are numeric aggregates.
+    select_cols = ["datetime_gmt", "generation_mw", "installedcapacity_mwp", "capacity_mwp"]
     base = (
-        pd.concat([df[numeric_cols] for df in source_dfs], ignore_index=True)
+        pd.concat([df[select_cols] for df in source_dfs], ignore_index=True)
         .groupby("datetime_gmt", as_index=False)
         .sum()
     )
@@ -289,41 +289,11 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
         gid for gid in gsp_merge_weights if gid not in live_id_set and gid < n_gsps
     ]
 
-    for gsp_id in list(gsp_ids) + merged_gsp_ids:
+    total_gsps = len(gsp_ids) + len(merged_gsp_ids)
 
-        # If this ID is a remapping target, reconstruct from weighted sources.
-        if gsp_id in gsp_merge_weights:
-            result = reconstruct_gsp_from_weights(
-                gsp_id=gsp_id,
-                weights_config=gsp_merge_weights[gsp_id].pvlive_merge_weights,
-                pvlive=pvlive,
-                start=start,
-                end=end,
-                fetched_cache=fetched_cache,
-            )
-            if result is None:
-                continue
-            gsp_yield_df = result
-
-        # Normal direct fetch.
-        else:
-            logger.info(
-                f"Getting data for GSP ID {gsp_id}, out of {len(gsp_ids) + len(merged_gsp_ids)} GSPs, for regime {regime}"
-            )
-            gsp_yield_df = pvlive.between(
-                start=start,
-                end=end,
-                entity_type="gsp",
-                entity_id=gsp_id,
-                dataframe=True,
-                extra_fields="installedcapacity_mwp,capacity_mwp,updated_gmt",
-            )
-            # Cache in case this ID is needed as a source for a later remapping target.
-            fetched_cache[gsp_id] = gsp_yield_df
-
-        logger.debug(
-            f"Got {len(gsp_yield_df)} gsp yield for gsp id {gsp_id} before filtering"
-        )
+    def _process_and_append(gsp_yield_df: pd.DataFrame, gsp_id: int) -> None:
+        """Apply shared post-fetch transformations and append to all_gsps_yields."""
+        logger.debug(f"Got {len(gsp_yield_df)} gsp yield for gsp id {gsp_id} before filtering")
 
         # TODO if did not find any values,
         # https://github.com/openclimatefix/solar-consumer/issues/104
@@ -361,8 +331,37 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
 
         all_gsps_yields.append(gsp_yield_df)
 
-        # TODO back up
-        # if there is national but no gsps, make gsp from national
-        # https://github.com/openclimatefix/solar-consumer/issues/105
+    # Normal direct fetch for live GSP IDs.
+    for gsp_id in list(gsp_ids):
+        logger.info(f"Getting data for GSP ID {gsp_id}, out of {total_gsps} GSPs, for regime {regime}")
+        gsp_yield_df = pvlive.between(
+            start=start,
+            end=end,
+            entity_type="gsp",
+            entity_id=gsp_id,
+            dataframe=True,
+            extra_fields="installedcapacity_mwp,capacity_mwp,updated_gmt",
+        )
+        # Cache in case this ID is needed as a source for a later remapping target.
+        fetched_cache[gsp_id] = gsp_yield_df
+        _process_and_append(gsp_yield_df, gsp_id)
+
+    # Reconstruct retired/deprecated GSP IDs from weighted source GSPs.
+    for gsp_id in merged_gsp_ids:
+        result = reconstruct_gsp_from_weights(
+            gsp_id=gsp_id,
+            weights_config=gsp_merge_weights[gsp_id].pvlive_merge_weights,
+            pvlive=pvlive,
+            start=start,
+            end=end,
+            fetched_cache=fetched_cache,
+        )
+        if result is None:
+            continue
+        _process_and_append(result, gsp_id)
+
+    # TODO back up
+    # if there is national but no gsps, make gsp from national
+    # https://github.com/openclimatefix/solar-consumer/issues/105
 
     return pd.concat(all_gsps_yields, ignore_index=True)

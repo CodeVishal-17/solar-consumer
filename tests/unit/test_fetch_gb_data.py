@@ -2,22 +2,25 @@
 Unit Tests for GSP merge weights logic in fetch_gb_data.py
 
 Tests cover:
-- Split remapping: deprecated GSP reconstructed as sum of its parts
-- Merge remapping: reconstruction with fractional weight
-- Negative weight: special ARMO_P subtraction case
-- No-config: direct fetch behaviour is unchanged
-- Config loading: YAML parses to the correct dict structure
-- Deprecated IDs absent from pvlive.gsp_ids are not fetched
+1. Split remapping: deprecated GSP reconstructed as sum of its parts
+2. Merge remapping: reconstruction with fractional weight
+3. Negative weight: rejected by Pydantic validation (weights must be >= 0)
+4. No-config: direct fetch behaviour is unchanged
+5. Config loading: YAML parses to the correct dict structure
+6. Deprecated IDs absent from pvlive.gsp_ids are not fetched
 """
 import os
+import pytest
 import textwrap
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
+from pydantic import ValidationError
 from solar_consumer.data.fetch_gb_data import (
     load_gsp_merge_weights,
     reconstruct_gsp_from_weights,
+    fetch_gb_data_historic,
     GSPMergeSource,
     GSPMergeConfig
 )
@@ -57,7 +60,7 @@ def _mock_pvlive(gsp_ids: list, between_side_effect) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 def test_config_loads_correctly(tmp_path):
-    """YAML parses to expected dict structure with int keys and float weights."""
+    """5. Config loading: YAML parses to expected dict structure with int keys and float weights."""
     yaml_content = textwrap.dedent("""\
         4:
           pvlive_merge_weights:
@@ -109,9 +112,9 @@ def test_config_loads_missing_file(tmp_path):
 # test_split_remapping
 # ---------------------------------------------------------------------------
 
-def test_split_remapping(tmp_path):
+def test_split_remapping(tmp_path, monkeypatch):
     """
-    GSP 4 is absent from pvlive.gsp_ids (it was split). It is defined in the
+    1. Split remapping: GSP 4 is absent from pvlive.gsp_ids (it was split). It is defined in the
     merge config with sources 324 (7 MW) and 325 (8 MW).
     Reconstructed generation for GSP 4 should be 15 MW per slot.
     """
@@ -139,12 +142,11 @@ def test_split_remapping(tmp_path):
     # gsp_ids from PVLive does NOT include ID 4 (it no longer exists in the registry).
     mock_pvl = _mock_pvlive(gsp_ids=[0, 1, 2, 3], between_side_effect=mock_between)
 
+    monkeypatch.delenv("UK_PVLIVE_N_GSPS", raising=False)
     with patch(
         "solar_consumer.data.fetch_gb_data.load_gsp_merge_weights",
         return_value=load_gsp_merge_weights(str(tmp_path / "gsp_merge_weights.yaml")),
     ), patch("solar_consumer.data.fetch_gb_data.PVLive", return_value=mock_pvl):
-        if "UK_PVLIVE_N_GSPS" in os.environ:
-            del os.environ["UK_PVLIVE_N_GSPS"]
         from solar_consumer.data.fetch_gb_data import fetch_gb_data_historic
         df = fetch_gb_data_historic(regime="in-day")
 
@@ -159,9 +161,9 @@ def test_split_remapping(tmp_path):
 # test_merge_remapping
 # ---------------------------------------------------------------------------
 
-def test_merge_remapping(tmp_path):
+def test_merge_remapping(tmp_path, monkeypatch):
     """
-    Tests fractional weight reconstruction: a hypothetical target GSP (ID 999,
+    2. Merge remapping: Tests fractional weight reconstruction: a hypothetical target GSP (ID 999,
     absent from pvlive.gsp_ids) is reconstructed with weight 0.5 from source
     GSP 351 (10 MW). Expected target generation = 5 MW per slot.
 
@@ -186,16 +188,14 @@ def test_merge_remapping(tmp_path):
 
     mock_pvl = _mock_pvlive(gsp_ids=[0, 1, 2], between_side_effect=mock_between)
 
+    monkeypatch.delenv("UK_PVLIVE_N_GSPS", raising=False)
+    # Set a high cap so fictional GSP ID 999 is not filtered out.
+    # The default cap (342) would exclude 999 (999 > 342).
+    monkeypatch.setenv("UK_PVLIVE_MAX_GSP_ID", "9999")
     with patch(
         "solar_consumer.data.fetch_gb_data.load_gsp_merge_weights",
         return_value=load_gsp_merge_weights(str(tmp_path / "gsp_merge_weights.yaml")),
     ), patch("solar_consumer.data.fetch_gb_data.PVLive", return_value=mock_pvl):
-        if "UK_PVLIVE_N_GSPS" in os.environ:
-            del os.environ["UK_PVLIVE_N_GSPS"]
-        # Set a high cap so fictional GSP ID 999 is not filtered out.
-        # Deleting the env var falls back to the default 342, which excludes 999 (999 > 342).
-        os.environ["UK_PVLIVE_MAX_GSP_ID"] = "9999"
-        from solar_consumer.data.fetch_gb_data import fetch_gb_data_historic
         df = fetch_gb_data_historic(regime="in-day")
     gsp999 = df[df["gsp_id"] == 999]
     assert not gsp999.empty, "Expected rows for remapped GSP ID 999"
@@ -211,57 +211,27 @@ def test_merge_remapping(tmp_path):
 
 def test_negative_weight(tmp_path):
     """
-    ARMO_P case: source gsp_id=12 has weight=1.0 (10 MW) and
-    gsp_id=99 has weight=-1.0 (3 MW). GSP 158 is absent from pvlive.gsp_ids.
-    Expected reconstructed generation = 7 MW per slot.
+    3. Negative weight: A negative weight in the YAML config should fail Pydantic validation.
     """
     yaml_content = textwrap.dedent("""\
         158:
           pvlive_merge_weights:
             - gsp_id: 12
-              weight: 1.0
-            - gsp_id: 99
               weight: -1.0
     """)
     (tmp_path / "gsp_merge_weights.yaml").write_text(yaml_content)
 
-    source_12 = _make_gsp_df(generation_mw=10.0)
-    source_99 = _make_gsp_df(generation_mw=3.0)
-
-    def mock_between(**kwargs):
-        eid = kwargs["entity_id"]
-        if eid == 12:
-            return source_12.copy()
-        if eid == 99:
-            return source_99.copy()
-        return _make_gsp_df(0.0)
-
-    mock_pvl = _mock_pvlive(gsp_ids=[0, 1, 2], between_side_effect=mock_between)
-
-    with patch(
-        "solar_consumer.data.fetch_gb_data.load_gsp_merge_weights",
-        return_value=load_gsp_merge_weights(str(tmp_path / "gsp_merge_weights.yaml")),
-    ), patch("solar_consumer.data.fetch_gb_data.PVLive", return_value=mock_pvl):
-        if "UK_PVLIVE_N_GSPS" in os.environ:
-            del os.environ["UK_PVLIVE_N_GSPS"]
-        if "UK_PVLIVE_MAX_GSP_ID" in os.environ:
-            del os.environ["UK_PVLIVE_MAX_GSP_ID"]
-        from solar_consumer.data.fetch_gb_data import fetch_gb_data_historic
-        df = fetch_gb_data_historic(regime="in-day")
-    gsp158 = df[df["gsp_id"] == 158]
-    assert not gsp158.empty, "Expected rows for remapped GSP ID 158"
-    assert np.allclose(gsp158["solar_generation_kw"].values, 7_000.0), (
-        f"Expected 7000 kW, got {gsp158['solar_generation_kw'].unique()}"
-    )
+    with pytest.raises(ValidationError):
+        load_gsp_merge_weights(str(tmp_path / "gsp_merge_weights.yaml"))
 
 
 # ---------------------------------------------------------------------------
 # test_no_merge_weights_unchanged
 # ---------------------------------------------------------------------------
 
-def test_no_merge_weights_unchanged(tmp_path):
+def test_no_merge_weights_unchanged(tmp_path, monkeypatch):
     """
-    With an empty merge config, the loop iterates exactly over pvlive.gsp_ids.
+    4. No-config: With an empty merge config, the loop iterates exactly over pvlive.gsp_ids.
     All returned IDs should appear in the output.
     """
     source_df = _make_gsp_df(generation_mw=5.0)
@@ -272,13 +242,11 @@ def test_no_merge_weights_unchanged(tmp_path):
     # PVLive returns exactly IDs 0, 1, 2, 3.
     mock_pvl = _mock_pvlive(gsp_ids=[0, 1, 2, 3], between_side_effect=mock_between)
 
+    monkeypatch.delenv("UK_PVLIVE_N_GSPS", raising=False)
     with patch(
         "solar_consumer.data.fetch_gb_data.load_gsp_merge_weights",
         return_value={},
     ), patch("solar_consumer.data.fetch_gb_data.PVLive", return_value=mock_pvl):
-        if "UK_PVLIVE_N_GSPS" in os.environ:
-            del os.environ["UK_PVLIVE_N_GSPS"]
-        from solar_consumer.data.fetch_gb_data import fetch_gb_data_historic
         df = fetch_gb_data_historic(regime="in-day")
 
     assert set(df["gsp_id"].unique()) == {0, 1, 2, 3}
@@ -289,9 +257,9 @@ def test_no_merge_weights_unchanged(tmp_path):
 # test_deprecated_ids_without_mapping_are_skipped
 # ---------------------------------------------------------------------------
 
-def test_deprecated_ids_without_mapping_are_skipped(tmp_path):
+def test_deprecated_ids_without_mapping_are_skipped(tmp_path, monkeypatch):
     """
-    IDs absent from pvlive.gsp_ids that have no merge config entry
+    6. Deprecated IDs absent from pvlive.gsp_ids are not fetched: IDs absent from pvlive.gsp_ids that have no merge config entry
     are simply never iterated — they do not appear in the output.
     """
     source_df = _make_gsp_df(generation_mw=1.0)
@@ -302,13 +270,11 @@ def test_deprecated_ids_without_mapping_are_skipped(tmp_path):
     # PVLive omits IDs 4 and 5 (they no longer exist in its registry).
     mock_pvl = _mock_pvlive(gsp_ids=[0, 1, 2, 3, 6], between_side_effect=mock_between)
 
+    monkeypatch.delenv("UK_PVLIVE_N_GSPS", raising=False)
     with patch(
         "solar_consumer.data.fetch_gb_data.load_gsp_merge_weights",
         return_value={},
     ), patch("solar_consumer.data.fetch_gb_data.PVLive", return_value=mock_pvl):
-        if "UK_PVLIVE_N_GSPS" in os.environ:
-            del os.environ["UK_PVLIVE_N_GSPS"]
-        from solar_consumer.data.fetch_gb_data import fetch_gb_data_historic
         df = fetch_gb_data_historic(regime="in-day")
 
     returned_ids = set(df["gsp_id"].unique())
@@ -382,22 +348,9 @@ def test_reconstruct_fractional_weight():
 
 
 def test_reconstruct_negative_weight():
-    """Negative weight subtracts one source from another (ARMO_P pattern)."""
-    src_a = _make_gsp_df(generation_mw=10.0)
-    src_b = _make_gsp_df(generation_mw=3.0)
-    pvlive = _make_pvlive_mock({12: src_a, 99: src_b})
-    config = [
-        GSPMergeSource(gsp_id=12, weight=1.0),
-        GSPMergeSource(gsp_id=99, weight=-1.0),
-    ]
-
-    result = reconstruct_gsp_from_weights(
-        gsp_id=158, weights_config=config, pvlive=pvlive,
-        start=START, end=END, fetched_cache={},
-    )
-
-    assert result is not None
-    assert np.allclose(result["generation_mw"].values, 7.0)
+    """Negative weight is rejected by Pydantic validation."""
+    with pytest.raises(ValidationError):
+        GSPMergeSource(gsp_id=99, weight=-1.0)
 
 
 def test_reconstruct_uses_cache_and_skips_api_call():

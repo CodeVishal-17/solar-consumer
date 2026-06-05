@@ -123,12 +123,8 @@
 # -----------------------------------------------------------------------
 
 # ARMO_P (old, pre-HARG_P subtraction):
-# The current gsp_id=12 is 'ARMO_P|HARG_P' (combined). The old ARMO_P (ID 158)
-# is reconstructed as: generation[ARMO_P_old] = generation[ARMO_P|HARG_P] - generation[HARG_P]
-# Since HARG_P is now embedded in gsp_id=12, we use weight -1.0 to subtract it.
-# NOTE: Both source entries reference gsp_id=12 since HARG_P has no standalone current ID.
-# weight 1.0 for full ARMO_P|HARG_P, weight -1.0 conceptually for HARG_P portion.
-# TODO: Confirm this mapping — HARG_P may eventually get its own standalone ID.
+# The current gsp_id=12 is 'ARMO_P|HARG_P' (combined). HARG_P has no standalone
+# current ID, so we use the full combined generation as a proxy for old ARMO_P (ID 158).
 158:
   pvlive_merge_weights:
     - gsp_id: 12   # ARMO_P|HARG_P (new combined region, weight=1.0 gives full generation)
