@@ -222,6 +222,47 @@ def reconstruct_gsp_from_weights(
     return base
 
 
+def process_gsp_yield(gsp_yield_df: pd.DataFrame, gsp_id: int, regime: str) -> pd.DataFrame:
+    """Apply shared post-fetch transformations."""
+    logger.debug(f"Got {len(gsp_yield_df)} gsp yield for gsp id {gsp_id} before filtering")
+
+    # TODO if did not find any values,
+    # https://github.com/openclimatefix/solar-consumer/issues/104
+    # Make nighttime zeros
+
+    # capacity is zero, set generation to 0
+    if gsp_yield_df["capacity_mwp"].sum() == 0:
+        gsp_yield_df["generation_mw"] = 0
+
+    # drop nan value in generation_mw column if not all are nans
+    # this gets rid of last value if it is nan
+    if not gsp_yield_df["generation_mw"].isnull().all():
+        gsp_yield_df = gsp_yield_df.dropna(subset=["generation_mw"])
+
+    # need columns datetime_utc, solar_generation_kw
+    gsp_yield_df["solar_generation_kw"] = 1000 * gsp_yield_df["generation_mw"]
+    gsp_yield_df["target_datetime_utc"] = gsp_yield_df["datetime_gmt"]
+    gsp_yield_df["pvlive_updated_utc"] = pd.to_datetime(gsp_yield_df["updated_gmt"])
+
+    # Convert capacity to kW
+    gsp_yield_df["capacity_kw"] = gsp_yield_df["capacity_mwp"] * 1000
+    gsp_yield_df["capacity_no_degradation_kw"] = gsp_yield_df["installedcapacity_mwp"] * 1000
+
+    gsp_yield_df = gsp_yield_df[
+        [
+            "solar_generation_kw",
+            "target_datetime_utc",
+            "capacity_kw",
+            "capacity_no_degradation_kw",
+            "pvlive_updated_utc",
+        ]
+    ].copy()
+    gsp_yield_df["regime"] = regime
+    gsp_yield_df["gsp_id"] = gsp_id
+
+    return gsp_yield_df
+
+
 def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
     """Fetch data from PVLive
 
@@ -291,46 +332,6 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
 
     total_gsps = len(gsp_ids) + len(merged_gsp_ids)
 
-    def _process_and_append(gsp_yield_df: pd.DataFrame, gsp_id: int) -> None:
-        """Apply shared post-fetch transformations and append to all_gsps_yields."""
-        logger.debug(f"Got {len(gsp_yield_df)} gsp yield for gsp id {gsp_id} before filtering")
-
-        # TODO if did not find any values,
-        # https://github.com/openclimatefix/solar-consumer/issues/104
-        # Make nighttime zeros
-
-        # capacity is zero, set generation to 0
-        if gsp_yield_df["capacity_mwp"].sum() == 0:
-            gsp_yield_df["generation_mw"] = 0
-
-        # drop nan value in generation_mw column if not all are nans
-        # this gets rid of last value if it is nan
-        if not gsp_yield_df["generation_mw"].isnull().all():
-            gsp_yield_df = gsp_yield_df.dropna(subset=["generation_mw"])
-
-        # need columns datetime_utc, solar_generation_kw
-        gsp_yield_df["solar_generation_kw"] = 1000 * gsp_yield_df["generation_mw"]
-        gsp_yield_df["target_datetime_utc"] = gsp_yield_df["datetime_gmt"]
-        gsp_yield_df["pvlive_updated_utc"] = pd.to_datetime(gsp_yield_df["updated_gmt"])
-
-        # Convert capacity to kW
-        gsp_yield_df["capacity_kw"] = gsp_yield_df["capacity_mwp"] * 1000
-        gsp_yield_df["capacity_no_degradation_kw"] = gsp_yield_df["installedcapacity_mwp"] * 1000
-
-        gsp_yield_df = gsp_yield_df[
-            [
-                "solar_generation_kw",
-                "target_datetime_utc",
-                "capacity_kw",
-                "capacity_no_degradation_kw",
-                "pvlive_updated_utc",
-            ]
-        ]
-        gsp_yield_df["regime"] = regime
-        gsp_yield_df["gsp_id"] = gsp_id
-
-        all_gsps_yields.append(gsp_yield_df)
-
     # Normal direct fetch for live GSP IDs.
     for gsp_id in list(gsp_ids):
         logger.info(f"Getting data for GSP ID {gsp_id}, out of {total_gsps} GSPs, for regime {regime}")
@@ -344,7 +345,8 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
         )
         # Cache in case this ID is needed as a source for a later remapping target.
         fetched_cache[gsp_id] = gsp_yield_df
-        _process_and_append(gsp_yield_df, gsp_id)
+        processed_df = process_gsp_yield(gsp_yield_df, gsp_id, regime)
+        all_gsps_yields.append(processed_df)
 
     # Reconstruct retired/deprecated GSP IDs from weighted source GSPs.
     for gsp_id in merged_gsp_ids:
@@ -358,7 +360,8 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
         )
         if result is None:
             continue
-        _process_and_append(result, gsp_id)
+        processed_df = process_gsp_yield(result, gsp_id, regime)
+        all_gsps_yields.append(processed_df)
 
     # TODO back up
     # if there is national but no gsps, make gsp from national

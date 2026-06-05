@@ -55,7 +55,7 @@ def _mock_pvlive(gsp_ids: list, between_side_effect) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# test_config_loads_correctly
+# 5. test_config_loads_correctly
 # ---------------------------------------------------------------------------
 
 def test_config_loads_correctly(tmp_path):
@@ -108,7 +108,7 @@ def test_config_loads_missing_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# test_split_remapping
+# 1. test_split_remapping
 # ---------------------------------------------------------------------------
 
 def test_split_remapping(tmp_path, monkeypatch):
@@ -157,7 +157,7 @@ def test_split_remapping(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# test_merge_remapping
+# 2. test_merge_remapping
 # ---------------------------------------------------------------------------
 
 def test_merge_remapping(tmp_path, monkeypatch):
@@ -205,7 +205,7 @@ def test_merge_remapping(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# test_negative_weight
+# 3. test_negative_weight
 # ---------------------------------------------------------------------------
 
 def test_negative_weight(tmp_path):
@@ -225,7 +225,7 @@ def test_negative_weight(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# test_no_merge_weights_unchanged
+# 4. test_no_merge_weights_unchanged
 # ---------------------------------------------------------------------------
 
 def test_no_merge_weights_unchanged(tmp_path, monkeypatch):
@@ -253,7 +253,7 @@ def test_no_merge_weights_unchanged(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# test_deprecated_ids_without_mapping_are_skipped
+# 6. test_deprecated_ids_without_mapping_are_skipped
 # ---------------------------------------------------------------------------
 
 def test_deprecated_ids_without_mapping_are_skipped(tmp_path, monkeypatch):
