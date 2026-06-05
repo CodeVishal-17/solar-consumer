@@ -15,8 +15,15 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
+from solar_consumer.data.fetch_gb_data import (
+    load_gsp_merge_weights,
+    reconstruct_gsp_from_weights,
+    GSPMergeSource,
+    GSPMergeConfig
+)
 
-from solar_consumer.data.fetch_gb_data import load_gsp_merge_weights
+START = datetime(2025, 1, 14, 6, 0, tzinfo=timezone.utc)
+END   = datetime(2025, 1, 14, 8, 0, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -73,21 +80,22 @@ def test_config_loads_correctly(tmp_path):
     assert isinstance(result, dict)
     assert set(result.keys()) == {4, 139}
 
-    # Keys are ints, values are lists of dicts with int gsp_id and float weight.
-    for k in result:
+    # Keys are ints, values are GSPMergeConfig with a list of GSPMergeSource entries.
+    for k, config in result.items():
         assert isinstance(k, int)
-    for entries in result.values():
-        for entry in entries:
-            assert isinstance(entry["gsp_id"], int)
-            assert isinstance(entry["weight"], float)
+        assert isinstance(config, GSPMergeConfig)
+        for src in config.pvlive_merge_weights:
+            assert isinstance(src, GSPMergeSource)
+            assert isinstance(src.gsp_id, int)
+            assert isinstance(src.weight, float)
 
-    assert result[4] == [
-        {"gsp_id": 324, "weight": 1.0},
-        {"gsp_id": 325, "weight": 1.0},
+    assert [(s.gsp_id, s.weight) for s in result[4].pvlive_merge_weights] == [
+        (324, 1.0),
+        (325, 1.0),
     ]
-    assert result[139] == [
-        {"gsp_id": 323, "weight": 1.0},
-        {"gsp_id": 334, "weight": 1.0},
+    assert [(s.gsp_id, s.weight) for s in result[139].pvlive_merge_weights] == [
+        (323, 1.0),
+        (334, 1.0),
     ]
 
 
@@ -309,3 +317,188 @@ def test_deprecated_ids_without_mapping_are_skipped(tmp_path):
     assert 5 not in returned_ids, "GSP ID 5 should be absent (not in pvlive.gsp_ids)"
     # The IDs PVLive returned should all be present.
     assert {0, 1, 2, 3, 6}.issubset(returned_ids)
+
+
+# ---------------------------------------------------------------------------
+# reconstruct_gsp_from_weights — unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_pvlive_mock(source_data: dict[int, pd.DataFrame]) -> MagicMock:
+    """Return a PVLive mock whose .between() returns from source_data by entity_id."""
+    mock = MagicMock()
+    mock.between.side_effect = lambda **kw: source_data[kw["entity_id"]].copy()
+    return mock
+
+
+def test_reconstruct_single_source():
+    """Single source with weight=1.0 — result equals the source unchanged."""
+    src_df = _make_gsp_df(generation_mw=10.0)
+    pvlive = _make_pvlive_mock({1: src_df})
+    config = [GSPMergeSource(gsp_id=1, weight=1.0)]
+
+    result = reconstruct_gsp_from_weights(
+        gsp_id=99, weights_config=config, pvlive=pvlive,
+        start=START, end=END, fetched_cache={},
+    )
+
+    assert result is not None
+    assert list(result.columns) == ["datetime_gmt", "generation_mw", "installedcapacity_mwp", "capacity_mwp", "updated_gmt"]
+    assert (result["generation_mw"] == 10.0).all()
+
+
+def test_reconstruct_two_sources_summed():
+    """Two sources with weight=1.0 each — generation is summed per timestamp."""
+    src_a = _make_gsp_df(generation_mw=7.0)
+    src_b = _make_gsp_df(generation_mw=8.0)
+    pvlive = _make_pvlive_mock({10: src_a, 11: src_b})
+    config = [
+        GSPMergeSource(gsp_id=10, weight=1.0),
+        GSPMergeSource(gsp_id=11, weight=1.0),
+    ]
+
+    result = reconstruct_gsp_from_weights(
+        gsp_id=99, weights_config=config, pvlive=pvlive,
+        start=START, end=END, fetched_cache={},
+    )
+
+    assert result is not None
+    assert (result["generation_mw"] == 15.0).all()
+
+
+def test_reconstruct_fractional_weight():
+    """weight=0.5 halves the source generation."""
+    src_df = _make_gsp_df(generation_mw=10.0)
+    pvlive = _make_pvlive_mock({5: src_df})
+    config = [GSPMergeSource(gsp_id=5, weight=0.5)]
+
+    result = reconstruct_gsp_from_weights(
+        gsp_id=99, weights_config=config, pvlive=pvlive,
+        start=START, end=END, fetched_cache={},
+    )
+
+    assert result is not None
+    assert np.allclose(result["generation_mw"].values, 5.0)
+
+
+def test_reconstruct_negative_weight():
+    """Negative weight subtracts one source from another (ARMO_P pattern)."""
+    src_a = _make_gsp_df(generation_mw=10.0)
+    src_b = _make_gsp_df(generation_mw=3.0)
+    pvlive = _make_pvlive_mock({12: src_a, 99: src_b})
+    config = [
+        GSPMergeSource(gsp_id=12, weight=1.0),
+        GSPMergeSource(gsp_id=99, weight=-1.0),
+    ]
+
+    result = reconstruct_gsp_from_weights(
+        gsp_id=158, weights_config=config, pvlive=pvlive,
+        start=START, end=END, fetched_cache={},
+    )
+
+    assert result is not None
+    assert np.allclose(result["generation_mw"].values, 7.0)
+
+
+def test_reconstruct_uses_cache_and_skips_api_call():
+    """If source is already in fetched_cache, pvlive.between is NOT called for it."""
+    cached_df = _make_gsp_df(generation_mw=6.0)
+    pvlive = MagicMock()  # should never be called
+    cache = {42: cached_df}
+    config = [GSPMergeSource(gsp_id=42, weight=1.0)]
+
+    result = reconstruct_gsp_from_weights(
+        gsp_id=99, weights_config=config, pvlive=pvlive,
+        start=START, end=END, fetched_cache=cache,
+    )
+
+    pvlive.between.assert_not_called()
+    assert result is not None
+    assert (result["generation_mw"] == 6.0).all()
+
+
+def test_reconstruct_populates_cache():
+    """Newly fetched sources are stored in fetched_cache for the caller."""
+    src_df = _make_gsp_df(generation_mw=5.0)
+    pvlive = _make_pvlive_mock({7: src_df})
+    cache: dict = {}
+    config = [GSPMergeSource(gsp_id=7, weight=1.0)]
+
+    reconstruct_gsp_from_weights(
+        gsp_id=99, weights_config=config, pvlive=pvlive,
+        start=START, end=END, fetched_cache=cache,
+    )
+
+    assert 7 in cache, "Source GSP 7 should have been added to fetched_cache"
+
+
+def test_reconstruct_empty_weights_returns_none():
+    """Empty weights_config → no source_dfs → returns None."""
+    pvlive = MagicMock()
+    result = reconstruct_gsp_from_weights(
+        gsp_id=99, weights_config=[], pvlive=pvlive,
+        start=START, end=END, fetched_cache={},
+    )
+
+    assert result is None
+    pvlive.between.assert_not_called()
+
+
+def test_reconstruct_updated_gmt_from_first_source():
+    """updated_gmt in the result is taken from the first source DataFrame."""
+    t1 = datetime(2025, 1, 14, 7, 0, tzinfo=timezone.utc)
+    t2 = datetime(2025, 1, 14, 9, 0, tzinfo=timezone.utc)
+
+    datetimes = pd.date_range("2025-01-14 06:00", periods=2, freq="30min", tz="UTC")
+    src_a = pd.DataFrame({
+        "datetime_gmt": datetimes,
+        "generation_mw": [5.0, 5.0],
+        "installedcapacity_mwp": [100.0, 100.0],
+        "capacity_mwp": [90.0, 90.0],
+        "updated_gmt": [t1, t1],
+    })
+    src_b = pd.DataFrame({
+        "datetime_gmt": datetimes,
+        "generation_mw": [3.0, 3.0],
+        "installedcapacity_mwp": [50.0, 50.0],
+        "capacity_mwp": [45.0, 45.0],
+        "updated_gmt": [t2, t2],
+    })
+
+    pvlive = _make_pvlive_mock({1: src_a, 2: src_b})
+    config = [
+        GSPMergeSource(gsp_id=1, weight=1.0),
+        GSPMergeSource(gsp_id=2, weight=1.0),
+    ]
+
+    result = reconstruct_gsp_from_weights(
+        gsp_id=99, weights_config=config, pvlive=pvlive,
+        start=START, end=END, fetched_cache={},
+    )
+
+    assert result is not None
+    # updated_gmt must come from src_a (the first source), not src_b.
+    # .values strips timezone, so compare as tz-naive Timestamps.
+    expected = pd.Timestamp(t1.replace(tzinfo=None))
+    assert all(pd.Timestamp(ts) == expected for ts in result["updated_gmt"])
+
+
+def test_reconstruct_capacity_columns_summed():
+    """installedcapacity_mwp and capacity_mwp are summed across sources."""
+    src_a = _make_gsp_df(generation_mw=0.0)  # capacity_mwp=90, installedcapacity_mwp=100
+    src_b = _make_gsp_df(generation_mw=0.0)  # same
+    pvlive = _make_pvlive_mock({1: src_a, 2: src_b})
+    config = [
+        GSPMergeSource(gsp_id=1, weight=1.0),
+        GSPMergeSource(gsp_id=2, weight=1.0),
+    ]
+
+    result = reconstruct_gsp_from_weights(
+        gsp_id=99, weights_config=config, pvlive=pvlive,
+        start=START, end=END, fetched_cache={},
+    )
+
+    assert result is not None
+    assert (result["capacity_mwp"] == 180.0).all()
+    assert (result["installedcapacity_mwp"] == 200.0).all()
+
