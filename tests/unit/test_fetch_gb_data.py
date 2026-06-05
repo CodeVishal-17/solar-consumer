@@ -9,7 +9,6 @@ Tests cover:
 5. Config loading: YAML parses to the correct dict structure
 6. Deprecated IDs absent from pvlive.gsp_ids are not fetched
 """
-import os
 import pytest
 import textwrap
 import pandas as pd
