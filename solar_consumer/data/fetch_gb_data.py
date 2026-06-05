@@ -5,6 +5,7 @@ import json
 import os
 import yaml
 from loguru import logger
+from pydantic import BaseModel, Field
 
 from datetime import datetime, timedelta, timezone
 
@@ -74,12 +75,29 @@ def fetch_gb_data_forecast() -> pd.DataFrame:
     return df
 
 
-def load_gsp_merge_weights(config_path: str = None) -> dict:
-    """
-    Load GSP merge weight config from YAML.
+class GSPMergeSource(BaseModel):
+    """A single source GSP contributing to a merged/reconstructed target GSP."""
 
-    Returns a dict mapping each target GSP ID (int) to a list of source entries:
-        {target_gsp_id: [{"gsp_id": int, "weight": float}, ...]}
+    gsp_id: int
+    weight: float = Field(default=1.0, description="Multiplier applied to this source's generation")
+
+
+class GSPMergeConfig(BaseModel):
+    """Merge configuration for a single target GSP ID.
+
+    Holds the list of source GSPs (and their weights) whose generation is summed
+    to reconstruct the target GSP's generation.
+    """
+
+    pvlive_merge_weights: list[GSPMergeSource] = Field(default_factory=list)
+
+
+def load_gsp_merge_weights(config_path: str = None) -> dict[int, GSPMergeConfig]:
+    """
+    Load GSP merge weight config from YAML into validated Pydantic models.
+
+    Returns a dict mapping each target GSP ID (int) to a :class:`GSPMergeConfig`.
+    Weights default to 1.0 when omitted from the YAML.
 
     Missing or empty config files are handled gracefully — an empty dict is returned.
     """
@@ -96,16 +114,112 @@ def load_gsp_merge_weights(config_path: str = None) -> dict:
     if not raw:
         return {}
 
-    result = {}
+    result: dict[int, GSPMergeConfig] = {}
     for target_id, entry in raw.items():
-        weights = entry.get("pvlive_merge_weights", [])
-        result[int(target_id)] = [
-            {"gsp_id": int(w["gsp_id"]), "weight": float(w["weight"])}
-            for w in weights
-        ]
+        result[int(target_id)] = GSPMergeConfig.model_validate(entry or {})
 
     logger.info(f"Loaded GSP merge weights for {len(result)} target GSP IDs")
     return result
+
+
+def reconstruct_gsp_from_weights(
+    gsp_id: int,
+    weights_config: list[GSPMergeSource],
+    pvlive,
+    start: datetime,
+    end: datetime,
+    fetched_cache: dict[int, pd.DataFrame],
+) -> pd.DataFrame | None:
+    """Reconstruct a GSP's generation data from a weighted combination of source GSPs.
+
+    Fetches each source GSP from PVLive (using ``fetched_cache`` to avoid duplicate
+    API calls), scales its generation by the configured weight, then sums all weighted
+    sources together to produce a single synthesised DataFrame for ``gsp_id``.
+
+    Args:
+        gsp_id: Target GSP ID being reconstructed.
+        weights_config: List of :class:`GSPMergeSource` entries describing which
+            source GSP IDs to use and their respective weights.
+        pvlive: An initialised :class:`pvlive_api.PVLive` client instance.
+        start: Start of the query window (UTC-aware datetime).
+        end: End of the query window (UTC-aware datetime).
+        fetched_cache: Mutable cache dict shared with the caller; updated in-place
+            with any newly fetched source DataFrames.
+
+    Returns:
+        A DataFrame with the same columns as a standard PVLive response
+        (``datetime_gmt``, ``generation_mw``, ``installedcapacity_mwp``,
+        ``capacity_mwp``, ``updated_gmt``), or ``None`` if no source data
+        could be fetched.
+    """
+    source_dfs = []
+
+    source_summary = ", ".join(f"GSP {src.gsp_id} x{src.weight}" for src in weights_config)
+    logger.info(
+        f"GSP ID {gsp_id} is a remapping target — will be reconstructed "
+        f"from {len(weights_config)} source(s): [{source_summary}]"
+    )
+
+    for src in weights_config:
+        source_id = src.gsp_id
+        weight = src.weight
+
+        # Fetch source if not already cached.
+        if source_id not in fetched_cache:
+            logger.info(
+                f"  GSP {gsp_id} <- fetching source GSP {source_id} (weight={weight}) from PVLive"
+            )
+            source_df = pvlive.between(
+                start=start,
+                end=end,
+                entity_type="gsp",
+                entity_id=source_id,
+                dataframe=True,
+                extra_fields="installedcapacity_mwp,capacity_mwp,updated_gmt",
+            )
+            fetched_cache[source_id] = source_df
+        else:
+            logger.debug(
+                f"  GSP {gsp_id} <- source GSP {source_id} (weight={weight}) served from cache"
+            )
+
+        raw_total = fetched_cache[source_id]["generation_mw"].sum()
+        weighted = fetched_cache[source_id].copy()
+        weighted["generation_mw"] = weighted["generation_mw"] * weight
+        weighted_total = weighted["generation_mw"].sum()
+        logger.debug(
+            f"  GSP {gsp_id} <- source GSP {source_id}: "
+            f"raw generation sum={raw_total:.3f} MW, "
+            f"after weight ({weight}): {weighted_total:.3f} MW"
+        )
+        source_dfs.append(weighted)
+
+    if not source_dfs:
+        logger.warning(f"No source data found for remapped GSP ID {gsp_id}, skipping")
+        return None
+
+    # Grab updated_gmt from the first source before groupby drops non-numeric columns.
+    updated_gmt = source_dfs[0]["updated_gmt"].values
+
+    # Concatenate all weighted sources and sum every numeric column in one pass.
+    # generation_mw reflects the applied weights; capacity columns are summed so that
+    # the total capacity matches the total generation (avoids exceeding the 110% DP limit).
+    numeric_cols = ["datetime_gmt", "generation_mw", "installedcapacity_mwp", "capacity_mwp"]
+    base = (
+        pd.concat([df[numeric_cols] for df in source_dfs], ignore_index=True)
+        .groupby("datetime_gmt", as_index=False)
+        .sum()
+    )
+    base["updated_gmt"] = updated_gmt
+
+    final_total = base["generation_mw"].sum()
+    logger.info(
+        f"GSP ID {gsp_id} reconstruction complete: "
+        f"{len(weights_config)} source(s) combined, "
+        f"final generation sum={final_total:.3f} MW over {len(base)} timestamps"
+    )
+
+    return base
 
 
 def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
@@ -135,9 +249,9 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
 
     # Collect all source IDs that must be fetched to support remapping targets.
     required_source_ids: set[int] = set()
-    for weights in gsp_merge_weights.values():
-        for w in weights:
-            required_source_ids.add(w["gsp_id"])
+    for config in gsp_merge_weights.values():
+        for src in config.pvlive_merge_weights:
+            required_source_ids.add(src.gsp_id)
 
     datetime_utc = datetime.now(timezone.utc)
 
@@ -163,105 +277,38 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
     if n_gsps is not None:
         gsp_ids = [id for id in gsp_ids if id < n_gsps]
 
-
     # Cache fetched DataFrames by gsp_id to avoid duplicate API calls when the
     # same source ID is shared across multiple remapping targets.
     fetched_cache: dict[int, pd.DataFrame] = {}
 
-    # Append any merge-weights targets that aren't in the live registry
-    # (retired/deprecated IDs that need reconstruction from their replacements).
-    # Also apply the same n_gsps cap so UK_PVLIVE_MAX_GSP_ID limits all GSPs uniformly.
+    # Retired/deprecated IDs that need reconstruction from weighted source GSPs.
+    # These are absent from the live PVLive registry so we append them after the
+    # normal gsp_ids loop. The same n_gsps cap is applied for consistency.
     live_id_set = set(gsp_ids)
-    gsp_ids_to_process = list(gsp_ids) + [
+    merged_gsp_ids = [
         gid for gid in gsp_merge_weights if gid not in live_id_set and gid < n_gsps
     ]
 
-    for gsp_id in gsp_ids_to_process:
+    for gsp_id in list(gsp_ids) + merged_gsp_ids:
 
         # If this ID is a remapping target, reconstruct from weighted sources.
         if gsp_id in gsp_merge_weights:
-            weights_config = gsp_merge_weights[gsp_id]
-            source_dfs = []
-
-            source_summary = ", ".join(
-                f"GSP {w['gsp_id']} x{w['weight']}" for w in weights_config
+            result = reconstruct_gsp_from_weights(
+                gsp_id=gsp_id,
+                weights_config=gsp_merge_weights[gsp_id].pvlive_merge_weights,
+                pvlive=pvlive,
+                start=start,
+                end=end,
+                fetched_cache=fetched_cache,
             )
-            logger.info(
-                f"GSP ID {gsp_id} is a remapping target — will be reconstructed "
-                f"from {len(weights_config)} source(s): [{source_summary}]"
-            )
-
-            for w in weights_config:
-                source_id = w["gsp_id"]
-                weight = w["weight"]
-
-                # Fetch source if not already cached.
-                if source_id not in fetched_cache:
-                    logger.info(
-                        f"  GSP {gsp_id} <- fetching source GSP {source_id} (weight={weight}) from PVLive"
-                    )
-                    source_df = pvlive.between(
-                        start=start,
-                        end=end,
-                        entity_type="gsp",
-                        entity_id=source_id,
-                        dataframe=True,
-                        extra_fields="installedcapacity_mwp,capacity_mwp,updated_gmt",
-                    )
-                    fetched_cache[source_id] = source_df
-                else:
-                    logger.debug(
-                        f"  GSP {gsp_id} <- source GSP {source_id} (weight={weight}) served from cache"
-                    )
-
-                raw_total = fetched_cache[source_id]["generation_mw"].sum()
-                weighted = fetched_cache[source_id].copy()
-                weighted["generation_mw"] = weighted["generation_mw"] * weight
-                weighted_total = weighted["generation_mw"].sum()
-                logger.debug(
-                    f"  GSP {gsp_id} <- source GSP {source_id}: "
-                    f"raw generation sum={raw_total:.3f} MW, "
-                    f"after weight ({weight}): {weighted_total:.3f} MW"
-                )
-                source_dfs.append(weighted)
-
-            if not source_dfs:
-                logger.warning(
-                    f"No source data found for remapped GSP ID {gsp_id}, skipping"
-                )
+            if result is None:
                 continue
-
-            # Sum weighted generation across all sources, aligned by timestamp.
-            base = source_dfs[0][["datetime_gmt"]].copy()
-            base["generation_mw"] = sum(
-                df.set_index("datetime_gmt")["generation_mw"]
-                for df in source_dfs
-            ).values
-
-            # Sum capacities across all sources — generation is the total of all parts,
-            # so capacity must also be the total to avoid exceeding the 110% DP limit.
-            base["installedcapacity_mwp"] = sum(
-                df.set_index("datetime_gmt")["installedcapacity_mwp"]
-                for df in source_dfs
-            ).values
-            base["capacity_mwp"] = sum(
-                df.set_index("datetime_gmt")["capacity_mwp"]
-                for df in source_dfs
-            ).values
-            base["updated_gmt"] = source_dfs[0]["updated_gmt"].values
-            gsp_yield_df = base
-
-            final_total = base["generation_mw"].sum()
-            logger.info(
-                f"GSP ID {gsp_id} reconstruction complete: "
-                f"{len(weights_config)} source(s) combined, "
-                f"final generation sum={final_total:.3f} MW over {len(base)} timestamps"
-            )
+            gsp_yield_df = result
 
         # Normal direct fetch.
         else:
             logger.info(
-                f"Getting data for GSP ID {gsp_id}, out of {len(gsp_ids_to_process)} GSPs, for regime {regime}"
+                f"Getting data for GSP ID {gsp_id}, out of {len(gsp_ids) + len(merged_gsp_ids)} GSPs, for regime {regime}"
             )
             gsp_yield_df = pvlive.between(
                 start=start,

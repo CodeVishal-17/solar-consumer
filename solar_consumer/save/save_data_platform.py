@@ -77,19 +77,7 @@ async def _execute_async_tasks(
         if not ignore_exceptions:
             raise exc
         else:
-            # Surface INVALID_ARGUMENT separately — this usually means generation
-            # exceeded 110% of the DP's stored capacity (stale capacity on first run).
-            try:
-                from grpclib.exceptions import GRPCError
-                from grpclib.const import Status
-                if isinstance(exc, GRPCError) and exc.status == Status.INVALID_ARGUMENT:
-                    logger.warning(
-                        f"INVALID_ARGUMENT from Data Platform (generation > 110% of stored capacity): {exc.message}"
-                    )
-                else:
-                    logger.warning(f"Task failed: {exc}")
-            except ImportError:
-                logger.warning(f"Task failed: {exc}")
+            logger.warning(f"Task failed: {exc}")
     return results
 
 
