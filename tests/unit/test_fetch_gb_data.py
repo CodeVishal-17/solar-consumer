@@ -2,12 +2,22 @@
 Unit Tests for GSP merge weights logic in fetch_gb_data.py
 
 Tests cover:
-1. Split remapping: deprecated GSP reconstructed as sum of its parts
-2. Merge remapping: reconstruction with fractional weight
-3. Negative weight: rejected by Pydantic validation (weights must be >= 0)
-4. No-config: direct fetch behaviour is unchanged
-5. Config loading: YAML parses to the correct dict structure
-6. Deprecated IDs absent from pvlive.gsp_ids are not fetched
+1. Config loading: YAML parses to the correct dict structure
+2. Config loading: returns empty dict when config file is missing
+3. Split remapping: deprecated GSP reconstructed as sum of its parts
+4. Merge remapping: reconstruction with fractional weight
+5. Negative weight: rejected by Pydantic validation (weights must be >= 0)
+6. No-config: direct fetch behaviour is unchanged
+7. Deprecated IDs absent from pvlive.gsp_ids are not fetched
+8. reconstruct_gsp_from_weights: single source with weight=1.0
+9. reconstruct_gsp_from_weights: two sources summed per timestamp
+10. reconstruct_gsp_from_weights: fractional weight halves generation
+11. reconstruct_gsp_from_weights: negative weight rejected by Pydantic
+12. reconstruct_gsp_from_weights: uses cache and skips API call
+13. reconstruct_gsp_from_weights: newly fetched sources populate cache
+14. reconstruct_gsp_from_weights: empty weights_config returns None
+15. reconstruct_gsp_from_weights: updated_gmt taken from first source
+16. reconstruct_gsp_from_weights: capacity columns summed across sources
 """
 import pytest
 import textwrap
@@ -55,11 +65,11 @@ def _mock_pvlive(gsp_ids: list, between_side_effect) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# 5. test_config_loads_correctly
+# 1. test_config_loads_correctly
 # ---------------------------------------------------------------------------
 
 def test_config_loads_correctly(tmp_path):
-    """5. Config loading: YAML parses to expected dict structure with int keys and float weights."""
+    """1. Config loading: YAML parses to expected dict structure with int keys and float weights."""
     yaml_content = textwrap.dedent("""\
         4:
           pvlive_merge_weights:
@@ -101,19 +111,23 @@ def test_config_loads_correctly(tmp_path):
     ]
 
 
+# ---------------------------------------------------------------------------
+# 2. test_config_loads_missing_file
+# ---------------------------------------------------------------------------
+
 def test_config_loads_missing_file(tmp_path):
-    """Returns empty dict when config file does not exist."""
+    """2. Config loading: returns empty dict when config file does not exist."""
     result = load_gsp_merge_weights(str(tmp_path / "nonexistent.yaml"))
     assert result == {}
 
 
 # ---------------------------------------------------------------------------
-# 1. test_split_remapping
+# 3. test_split_remapping
 # ---------------------------------------------------------------------------
 
 def test_split_remapping(tmp_path, monkeypatch):
     """
-    1. Split remapping: GSP 4 is absent from pvlive.gsp_ids (it was split). It is defined in the
+    3. Split remapping: GSP 4 is absent from pvlive.gsp_ids (it was split). It is defined in the
     merge config with sources 324 (7 MW) and 325 (8 MW).
     Reconstructed generation for GSP 4 should be 15 MW per slot.
     """
@@ -157,12 +171,12 @@ def test_split_remapping(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 2. test_merge_remapping
+# 4. test_merge_remapping
 # ---------------------------------------------------------------------------
 
 def test_merge_remapping(tmp_path, monkeypatch):
     """
-    2. Merge remapping: Tests fractional weight reconstruction: a hypothetical target GSP (ID 999,
+    4. Merge remapping: Tests fractional weight reconstruction: a hypothetical target GSP (ID 999,
     absent from pvlive.gsp_ids) is reconstructed with weight 0.5 from source
     GSP 351 (10 MW). Expected target generation = 5 MW per slot.
 
@@ -203,14 +217,13 @@ def test_merge_remapping(tmp_path, monkeypatch):
     )
 
 
-
 # ---------------------------------------------------------------------------
-# 3. test_negative_weight
+# 5. test_negative_weight
 # ---------------------------------------------------------------------------
 
 def test_negative_weight(tmp_path):
     """
-    3. Negative weight: A negative weight in the YAML config should fail Pydantic validation.
+    5. Negative weight: A negative weight in the YAML config should fail Pydantic validation.
     """
     yaml_content = textwrap.dedent("""\
         158:
@@ -225,12 +238,12 @@ def test_negative_weight(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 4. test_no_merge_weights_unchanged
+# 6. test_no_merge_weights_unchanged
 # ---------------------------------------------------------------------------
 
 def test_no_merge_weights_unchanged(tmp_path, monkeypatch):
     """
-    4. No-config: With an empty merge config, the loop iterates exactly over pvlive.gsp_ids.
+    6. No-config: With an empty merge config, the loop iterates exactly over pvlive.gsp_ids.
     All returned IDs should appear in the output.
     """
     source_df = _make_gsp_df(generation_mw=5.0)
@@ -253,12 +266,12 @@ def test_no_merge_weights_unchanged(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 6. test_deprecated_ids_without_mapping_are_skipped
+# 7. test_deprecated_ids_without_mapping_are_skipped
 # ---------------------------------------------------------------------------
 
 def test_deprecated_ids_without_mapping_are_skipped(tmp_path, monkeypatch):
     """
-    6. Deprecated IDs absent from pvlive.gsp_ids are not fetched: IDs absent from pvlive.gsp_ids that have no merge config entry
+    7. Deprecated IDs absent from pvlive.gsp_ids are not fetched: IDs absent from pvlive.gsp_ids that have no merge config entry
     are simply never iterated — they do not appear in the output.
     """
     source_df = _make_gsp_df(generation_mw=1.0)
@@ -297,7 +310,7 @@ def _make_pvlive_mock(source_data: dict[int, pd.DataFrame]) -> MagicMock:
 
 
 def test_reconstruct_single_source():
-    """Single source with weight=1.0 — result equals the source unchanged."""
+    """8. Single source with weight=1.0 — result equals the source unchanged."""
     src_df = _make_gsp_df(generation_mw=10.0)
     pvlive = _make_pvlive_mock({1: src_df})
     config = [GSPMergeSource(gsp_id=1, weight=1.0)]
@@ -313,7 +326,7 @@ def test_reconstruct_single_source():
 
 
 def test_reconstruct_two_sources_summed():
-    """Two sources with weight=1.0 each — generation is summed per timestamp."""
+    """9. Two sources with weight=1.0 each — generation is summed per timestamp."""
     src_a = _make_gsp_df(generation_mw=7.0)
     src_b = _make_gsp_df(generation_mw=8.0)
     pvlive = _make_pvlive_mock({10: src_a, 11: src_b})
@@ -332,7 +345,7 @@ def test_reconstruct_two_sources_summed():
 
 
 def test_reconstruct_fractional_weight():
-    """weight=0.5 halves the source generation."""
+    """10. weight=0.5 halves the source generation."""
     src_df = _make_gsp_df(generation_mw=10.0)
     pvlive = _make_pvlive_mock({5: src_df})
     config = [GSPMergeSource(gsp_id=5, weight=0.5)]
@@ -347,13 +360,13 @@ def test_reconstruct_fractional_weight():
 
 
 def test_reconstruct_negative_weight():
-    """Negative weight is rejected by Pydantic validation."""
+    """11. Negative weight is rejected by Pydantic validation."""
     with pytest.raises(ValidationError):
         GSPMergeSource(gsp_id=99, weight=-1.0)
 
 
 def test_reconstruct_uses_cache_and_skips_api_call():
-    """If source is already in fetched_cache, pvlive.between is NOT called for it."""
+    """12. If source is already in fetched_cache, pvlive.between is NOT called for it."""
     cached_df = _make_gsp_df(generation_mw=6.0)
     pvlive = MagicMock()  # should never be called
     cache = {42: cached_df}
@@ -370,7 +383,7 @@ def test_reconstruct_uses_cache_and_skips_api_call():
 
 
 def test_reconstruct_populates_cache():
-    """Newly fetched sources are stored in fetched_cache for the caller."""
+    """13. Newly fetched sources are stored in fetched_cache for the caller."""
     src_df = _make_gsp_df(generation_mw=5.0)
     pvlive = _make_pvlive_mock({7: src_df})
     cache: dict = {}
@@ -385,7 +398,7 @@ def test_reconstruct_populates_cache():
 
 
 def test_reconstruct_empty_weights_returns_none():
-    """Empty weights_config → no source_dfs → returns None."""
+    """14. Empty weights_config → no source_dfs → returns None."""
     pvlive = MagicMock()
     result = reconstruct_gsp_from_weights(
         gsp_id=99, weights_config=[], pvlive=pvlive,
@@ -397,7 +410,7 @@ def test_reconstruct_empty_weights_returns_none():
 
 
 def test_reconstruct_updated_gmt_from_first_source():
-    """updated_gmt in the result is taken from the first source DataFrame."""
+    """15. updated_gmt in the result is taken from the first source DataFrame."""
     t1 = datetime(2025, 1, 14, 7, 0, tzinfo=timezone.utc)
     t2 = datetime(2025, 1, 14, 9, 0, tzinfo=timezone.utc)
 
@@ -436,7 +449,7 @@ def test_reconstruct_updated_gmt_from_first_source():
 
 
 def test_reconstruct_capacity_columns_summed():
-    """installedcapacity_mwp and capacity_mwp are summed across sources."""
+    """16. installedcapacity_mwp and capacity_mwp are summed across sources."""
     src_a = _make_gsp_df(generation_mw=0.0)  # capacity_mwp=90, installedcapacity_mwp=100
     src_b = _make_gsp_df(generation_mw=0.0)  # same
     pvlive = _make_pvlive_mock({1: src_a, 2: src_b})
@@ -453,4 +466,3 @@ def test_reconstruct_capacity_columns_summed():
     assert result is not None
     assert (result["capacity_mwp"] == 180.0).all()
     assert (result["installedcapacity_mwp"] == 200.0).all()
-
