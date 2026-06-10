@@ -173,11 +173,11 @@ def test_gb_historic_inday():
 
     # set enviormental variable REGIME to inday
     os.environ["UK_PVLIVE_REGIME"] = "in-day"
-    os.environ["UK_PVLIVE_MAX_GSP_ID"] = "10"
+    os.environ["UK_PVLIVE_MAX_GSP_ID"] = "9"
 
     df = fetch_data(country = "gb", historic_or_forecast = "historic")
 
-    # With UK_PVLIVE_MAX_GSP_ID=10 (filter: id < 10), PVLive returns 8 live GSPs
+    # With UK_PVLIVE_MAX_GSP_ID=9 (filter: id <= 9), PVLive returns 8 live GSPs
     # (IDs 4 and 5 are absent from the registry). However, IDs 4 and 5 are
     # configured in gsp_merge_weights and are reconstructed from their split
     # replacement GSPs — so the total is 10 GSPs processed.
@@ -191,11 +191,11 @@ def test_gb_historic_day_after():
 
     # set enviormental variable REGIME to inday
     os.environ["UK_PVLIVE_REGIME"] = "day-after"
-    os.environ["UK_PVLIVE_MAX_GSP_ID"] = "10"
+    os.environ["UK_PVLIVE_MAX_GSP_ID"] = "9"
 
     df = fetch_data(country = "gb", historic_or_forecast = "historic")
 
-    # With UK_PVLIVE_MAX_GSP_ID=10 (filter: id < 10), PVLive returns 8 live GSPs
+    # With UK_PVLIVE_MAX_GSP_ID=9 (filter: id <= 9), PVLive returns 8 live GSPs
     # (IDs 4 and 5 are absent from the registry). However, IDs 4 and 5 are
     # configured in gsp_merge_weights and are reconstructed from their split
     # replacement GSPs — so the total is 10 GSPs processed.
