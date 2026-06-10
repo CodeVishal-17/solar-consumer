@@ -319,9 +319,9 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
     # This avoids a hardcoded ignore list — IDs that no longer exist in PVLive
     # simply won't appear here.
     gsp_ids = pvlive.gsp_ids
-    n_gsps = int(os.getenv("UK_PVLIVE_MAX_GSP_ID", 348))
-    if n_gsps is not None:
-        gsp_ids = [id for id in gsp_ids if id <= n_gsps]
+    n_gsps = int(os.getenv("UK_PVLIVE_MAX_GSP_ID", 342))
+    
+    gsp_ids = [id for id in gsp_ids if id <= n_gsps]
 
     # Cache fetched DataFrames by gsp_id to avoid duplicate API calls when the
     # same source ID is shared across multiple remapping targets.
