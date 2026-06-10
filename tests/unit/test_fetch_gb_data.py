@@ -466,27 +466,3 @@ def test_reconstruct_capacity_columns_summed():
     assert result is not None
     assert (result["capacity_mwp"] == 180.0).all()
     assert (result["installedcapacity_mwp"] == 200.0).all()
-
-
-def test_process_gsp_yield_fills_night_nans():
-    """Test that process_gsp_yield fills night-time NaNs with 0.0."""
-    from solar_consumer.data.fetch_gb_data import process_gsp_yield
-    
-    # 20:00 (night) and 12:00 (day)
-    datetimes = pd.to_datetime(["2025-01-14 20:00:00", "2025-01-14 12:00:00"])
-    
-    df = pd.DataFrame({
-        "datetime_gmt": datetimes,
-        "generation_mw": [np.nan, np.nan],
-        "installedcapacity_mwp": [100.0, 100.0],
-        "capacity_mwp": [90.0, 90.0],
-        "updated_gmt": [datetime(2025, 1, 14, 8, 0, tzinfo=timezone.utc)] * 2
-    })
-    
-    result = process_gsp_yield(df, gsp_id=99, regime="in-day")
-    
-    # The night NaN (row 0) should be filled with 0.0.
-    # The day NaN (row 1) should be dropped by dropna.
-    assert len(result) == 1
-    assert result.iloc[0]["solar_generation_kw"] == 0.0
-    assert result.iloc[0]["target_datetime_utc"].hour == 20

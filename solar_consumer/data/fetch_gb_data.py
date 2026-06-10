@@ -234,11 +234,7 @@ def process_gsp_yield(gsp_yield_df: pd.DataFrame, gsp_id: int, regime: str) -> p
     if gsp_yield_df["capacity_mwp"].sum() == 0:
         gsp_yield_df["generation_mw"] = 0
 
-    # Make nighttime NaNs zero
-    dt = pd.to_datetime(gsp_yield_df["datetime_gmt"])
-    is_night = (dt.dt.hour >= 20) | (dt.dt.hour <= 4)
-    gsp_yield_df.loc[is_night & gsp_yield_df["generation_mw"].isna(), "generation_mw"] = 0.0
-
+    
     # drop nan value in generation_mw column if not all are nans
     # this gets rid of last value if it is nan
     if not gsp_yield_df["generation_mw"].isnull().all():
