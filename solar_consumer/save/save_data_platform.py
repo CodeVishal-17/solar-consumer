@@ -273,13 +273,13 @@ async def _filter_existing_observations(
         )
         idx = merged["_exists"].fillna(False)
         if idx.any():
-            duplicate_location_uuids = joined_df.loc[idx, "location_uuid"].unique()
+            duplicate_location_uuids = merged.loc[idx, "location_uuid"].unique()
             logger.warning(
                 f"Found {idx.sum()} values already existing in data platform "
                 f"for location_uuid {duplicate_location_uuids}. "
                 "These values will be dropped."
             )
-            joined_df = joined_df[~idx.values]
+            joined_df = merged[~idx].drop(columns=["_exists"])
 
     return joined_df
 

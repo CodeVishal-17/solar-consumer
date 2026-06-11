@@ -234,6 +234,7 @@ def process_gsp_yield(gsp_yield_df: pd.DataFrame, gsp_id: int, regime: str) -> p
     if gsp_yield_df["capacity_mwp"].sum() == 0:
         gsp_yield_df["generation_mw"] = 0
 
+    
     # drop nan value in generation_mw column if not all are nans
     # this gets rid of last value if it is nan
     if not gsp_yield_df["generation_mw"].isnull().all():
@@ -315,8 +316,8 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
     # simply won't appear here.
     gsp_ids = pvlive.gsp_ids
     n_gsps = int(os.getenv("UK_PVLIVE_MAX_GSP_ID", 342))
-    if n_gsps is not None:
-        gsp_ids = [id for id in gsp_ids if id < n_gsps]
+    
+    gsp_ids = [id for id in gsp_ids if id <= n_gsps]
 
     # Cache fetched DataFrames by gsp_id to avoid duplicate API calls when the
     # same source ID is shared across multiple remapping targets.
@@ -327,7 +328,7 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
     # normal gsp_ids loop. The same n_gsps cap is applied for consistency.
     live_id_set = set(gsp_ids)
     merged_gsp_ids = [
-        gid for gid in gsp_merge_weights if gid not in live_id_set and gid < n_gsps
+        gid for gid in gsp_merge_weights if gid not in live_id_set and gid <= n_gsps
     ]
 
     total_gsps = len(gsp_ids) + len(merged_gsp_ids)
