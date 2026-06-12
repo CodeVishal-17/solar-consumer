@@ -323,18 +323,19 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
     # same source ID is shared across multiple remapping targets.
     fetched_cache: dict[int, pd.DataFrame] = {}
 
-    # Retired/deprecated IDs that need reconstruction from weighted source GSPs.
-    # These are absent from the live PVLive registry so we append them after the
-    # normal gsp_ids loop. The same n_gsps cap is applied for consistency.
-    live_id_set = set(gsp_ids)
+    # Target GSP IDs that need reconstruction from weighted source GSPs.
+    # The same n_gsps cap is applied for consistency.
     merged_gsp_ids = [
-        gid for gid in gsp_merge_weights if gid not in live_id_set and gid <= n_gsps
+        gid for gid in gsp_merge_weights if gid <= n_gsps
     ]
 
-    total_gsps = len(gsp_ids) + len(merged_gsp_ids)
+    # Exclude GSP IDs from direct fetch if they are in the merge weights config and will be reconstructed
+    direct_fetch_gsp_ids = [gid for gid in gsp_ids if gid not in gsp_merge_weights]
 
-    # Normal direct fetch for live GSP IDs.
-    for gsp_id in list(gsp_ids):
+    total_gsps = len(direct_fetch_gsp_ids) + len(merged_gsp_ids)
+
+    # Normal direct fetch for live GSP IDs (not in merge config).
+    for gsp_id in direct_fetch_gsp_ids:
         logger.info(f"Getting data for GSP ID {gsp_id}, out of {total_gsps} GSPs, for regime {regime}")
         gsp_yield_df = pvlive.between(
             start=start,
