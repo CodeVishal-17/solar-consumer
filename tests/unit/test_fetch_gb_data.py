@@ -18,6 +18,7 @@ Tests cover:
 14. reconstruct_gsp_from_weights: empty weights_config returns None
 15. reconstruct_gsp_from_weights: updated_gmt taken from first source
 16. reconstruct_gsp_from_weights: capacity columns summed across sources
+17. target GSP ID present in registry is skipped from direct fetch and reconstructed
 """
 import pytest
 import textwrap
@@ -466,3 +467,56 @@ def test_reconstruct_capacity_columns_summed():
     assert result is not None
     assert (result["capacity_mwp"] == 180.0).all()
     assert (result["installedcapacity_mwp"] == 200.0).all()
+
+
+# ---------------------------------------------------------------------------
+# 17. test_remapping_when_target_is_in_registry
+# ---------------------------------------------------------------------------
+
+def test_remapping_when_target_is_in_registry(tmp_path, monkeypatch):
+    """
+    17. Target GSP ID present in registry is skipped from direct fetch and reconstructed:
+    Verify that even if a GSP ID is returned by pvlive.gsp_ids, if it is defined in the
+    merge config, it is not fetched directly but is instead reconstructed from its sources.
+    """
+    yaml_content = textwrap.dedent("""\
+        4:
+          pvlive_merge_weights:
+            - gsp_id: 324
+              weight: 1.0
+            - gsp_id: 325
+              weight: 1.0
+    """)
+    (tmp_path / "gsp_merge_weights.yaml").write_text(yaml_content)
+
+    source_324 = _make_gsp_df(generation_mw=7.0)
+    source_325 = _make_gsp_df(generation_mw=8.0)
+
+    def mock_between(**kwargs):
+        eid = kwargs["entity_id"]
+        if eid == 324:
+            return source_324.copy()
+        if eid == 325:
+            return source_325.copy()
+        if eid == 4:
+            # If direct fetch occurs, return 999.0 MW
+            return _make_gsp_df(999.0)
+        return _make_gsp_df(0.0)
+
+    # PVLive registry DOES include ID 4.
+    mock_pvl = _mock_pvlive(gsp_ids=[0, 1, 2, 3, 4], between_side_effect=mock_between)
+
+    monkeypatch.delenv("UK_PVLIVE_N_GSPS", raising=False)
+    with patch(
+        "solar_consumer.data.fetch_gb_data.load_gsp_merge_weights",
+        return_value=load_gsp_merge_weights(str(tmp_path / "gsp_merge_weights.yaml")),
+    ), patch("solar_consumer.data.fetch_gb_data.PVLive", return_value=mock_pvl):
+        df = fetch_gb_data_historic(regime="in-day")
+
+    gsp4 = df[df["gsp_id"] == 4]
+    assert not gsp4.empty, "Expected rows for remapped GSP ID 4"
+    # Reconstructed generation should be 15 MW (15_000 kW), NOT 999 MW (999_000 kW)
+    assert (gsp4["solar_generation_kw"] == 15_000.0).all(), (
+        f"Expected 15000 kW (reconstructed), got {gsp4['solar_generation_kw'].unique()}"
+    )
+

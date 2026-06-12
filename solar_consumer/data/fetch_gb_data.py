@@ -315,7 +315,7 @@ def fetch_gb_data_historic(regime: str) -> pd.DataFrame:
     # This avoids a hardcoded ignore list — IDs that no longer exist in PVLive
     # simply won't appear here.
     gsp_ids = pvlive.gsp_ids
-    n_gsps = int(os.getenv("UK_PVLIVE_MAX_GSP_ID", 342))
+    n_gsps = int(os.getenv("UK_PVLIVE_MAX_GSP_ID", 348))
     
     gsp_ids = [id for id in gsp_ids if id <= n_gsps]
 

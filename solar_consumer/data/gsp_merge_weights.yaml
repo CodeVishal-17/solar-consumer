@@ -12,6 +12,12 @@
 # Keys are sourced from the gsp_id column in the legacy database CSV.
 # Resolved using pvl._get_gsp_list() on 2026-05-26.
 
+# ACTL_2|CBNK_H|GREE_H|PERI_H|WESA_H (4) -> 350  (20260611)
+4:
+  pvlive_merge_weights:
+    - gsp_id: 350
+      weight: 1.0
+
 # BRLE_1|FLEE_1 → BRLE_1 (343) & FLEE_1 (344)  (20251204)
 41:
   pvlive_merge_weights:
@@ -19,6 +25,18 @@
       weight: 1.0
     - gsp_id: 344  # FLEE_1
       weight: 1.0
+
+# CARR_1 (56) -> CARR_1|FIDF_1 (351)  (20260611)
+56:
+  pvlive_merge_weights:
+    - gsp_id: 351
+      weight: 0.27
+
+# FIDF_1 (122) -> CARR_1|FIDF_1 (351)  (20260611)
+122:
+  pvlive_merge_weights:
+    - gsp_id: 351
+      weight: 0.73
 
 # IVER_1|IVER_6 → IVER_1 (345) & IVER_6 (346)  (20251204)
 158:
