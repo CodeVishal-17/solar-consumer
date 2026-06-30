@@ -306,7 +306,8 @@ def get_entsoe_day_prices(start: pd.Timestamp, end: pd.Timestamp, api_key: str) 
             logger.warning(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
 
             if attempt == max_retries - 1:
-                raise
+                logger.exception("Failed to fetch ENTSOE day-ahead prices after all retries.")
+                raise e
 
             time.sleep(2**attempt)
 
